@@ -53,6 +53,9 @@ services:
     profiles: ["ingest"]
     entrypoint: ["shopflow-ingest"]
     command: ["all"]
+    # Writes into the ./data bind mount, which is owned by the host user. Running this
+    # local batch job as root avoids uid mismatches on Linux hosts. The API stays non-root.
+    user: "0:0"
     environment:
       DATABASE_URL: *db-url
       LIBRETRANSLATE_URL: http://libretranslate:5000

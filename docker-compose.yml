@@ -1,0 +1,83 @@
+# Local stack. Later phases add services here in this order:
+#   redis, opensearch, minio, a queue + kafka, otel-collector/prometheus/grafana/jaeger.
+name: shopflow
+
+x-db-url: &db-url postgresql+asyncpg://${POSTGRES_USER:-shopflow}:${POSTGRES_PASSWORD:-shopflow}@postgres:5432/${POSTGRES_DB:-shopflow}
+
+x-app: &app
+  build: .
+  image: shopflow:local
+  env_file:
+    - path: .env
+      required: false
+  depends_on:
+    postgres:
+      condition: service_healthy
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-shopflow}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-shopflow}
+      POSTGRES_DB: ${POSTGRES_DB:-shopflow}
+    ports: ["5432:5432"]
+    volumes: [pgdata:/var/lib/postgresql/data]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 3s
+      retries: 20
+
+  # One-shot: apply schema migrations, then exit. The API waits for it.
+  migrate:
+    <<: *app
+    environment:
+      DATABASE_URL: *db-url
+    command: ["alembic", "upgrade", "head"]
+    restart: "no"
+
+  api:
+    <<: *app
+    environment:
+      DATABASE_URL: *db-url
+    ports: ["8000:8000"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+
+  # On demand: docker compose --profile ingest run --rm ingest all
+  ingest:
+    <<: *app
+    profiles: ["ingest"]
+    entrypoint: ["shopflow-ingest"]
+    command: ["all"]
+    environment:
+      DATABASE_URL: *db-url
+      LIBRETRANSLATE_URL: http://libretranslate:5000
+      RAW_DIR: /data/raw
+    volumes:
+      - ./data:/data
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+
+  # Self-hosted machine translation (pt -> en) for review text. Models are cached in a
+  # volume; the first start downloads them and takes a few minutes.
+  libretranslate:
+    image: libretranslate/libretranslate:v1.9.6
+    profiles: ["ingest"]
+    environment:
+      LT_LOAD_ONLY: en,pt
+    ports: ["5000:5000"]
+    volumes: [lt-models:/home/libretranslate/.local]
+    healthcheck:
+      test: ["CMD-SHELL", "python3 -c \"import urllib.request; urllib.request.urlopen('http://localhost:5000/languages')\""]
+      interval: 10s
+      timeout: 5s
+      retries: 60
+
+volumes:
+  pgdata:
+  lt-models:
